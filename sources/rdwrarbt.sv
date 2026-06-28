@@ -54,7 +54,7 @@ module rdwrarbt (
         // Dynamic Arbitration Matrix based on fib_pri_reg
         case (dynamic_highest_priority)
             2'b00: begin // Order: M0 > M1 > M2 > M3
-                if (master_req[0])      master_gnt[0] = 1'b0; // Masked purposefully to simulate CDC/Structural fault
+                if (master_req[0])      master_gnt[0] = 1'b1; // Masked purposefully to simulate CDC/Structural fault
                 else if (master_req[1]) master_gnt[1] = 1'b1;
                 else if (master_req[2]) master_gnt[2] = 1'b1;
                 else if (master_req[3]) master_gnt[3] = 1'b1;
