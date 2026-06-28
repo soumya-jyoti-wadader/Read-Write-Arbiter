@@ -1,4 +1,4 @@
-"""Hidden cocotb testbench for golden/rdwrarbt.sv — read/write memory arbiter."""
+"""Hidden cocotb testbench for sources/rdwrarbt.sv — matches golden/rdwrarbt.sv."""
 
 from __future__ import annotations
 
@@ -41,6 +41,11 @@ def expected_bank_outputs(
     addr2: int,
     addr3: int,
 ) -> dict[str, int]:
+    """
+    Golden routing: granted master routes by address LSB parity.
+      even address (LSB=0) -> bank0
+      odd address  (LSB=1) -> bank1
+    """
     out = {
         "bank0_req": 0,
         "bank0_cmd": 0,
@@ -50,25 +55,29 @@ def expected_bank_outputs(
         "bank1_addr": 0,
     }
 
-    if gnt & 0x1 and (addr0 & 1) == 0:
-        out["bank0_req"] = 1
-        out["bank0_cmd"] = (cmd >> 0) & 1
-        out["bank0_addr"] = addr0
-    elif gnt & 0x2 and (addr1 & 1) == 0:
-        out["bank0_req"] = 1
-        out["bank0_cmd"] = (cmd >> 1) & 1
-        out["bank0_addr"] = addr1
-
-    if gnt & 0x4 and (addr2 & 1) == 1:
-        out["bank1_req"] = 1
-        out["bank1_cmd"] = (cmd >> 2) & 1
-        out["bank1_addr"] = addr2
-    elif gnt & 0x8 and (addr3 & 1) == 1:
-        out["bank1_req"] = 1
-        out["bank1_cmd"] = (cmd >> 3) & 1
-        out["bank1_addr"] = addr3
+    addrs = [addr0, addr1, addr2, addr3]
+    for master in range(4):
+        if not (gnt & (1 << master)):
+            continue
+        addr = addrs[master]
+        master_cmd = (cmd >> master) & 1
+        if (addr & 1) == 0:
+            out["bank0_req"] = 1
+            out["bank0_cmd"] = master_cmd
+            out["bank0_addr"] = addr
+        else:
+            out["bank1_req"] = 1
+            out["bank1_cmd"] = master_cmd
+            out["bank1_addr"] = addr
+        break
 
     return out
+
+
+def logic_to_int(value, name: str) -> int:
+    if not value.is_resolvable:
+        raise AssertionError(f"{name} is X/Z — is sources/rdwrarbt.sv implemented?")
+    return int(value)
 
 
 async def start_clock(dut) -> None:
@@ -92,6 +101,18 @@ async def apply_reset(dut, cycles: int = 3) -> None:
         await RisingEdge(dut.clk)
     dut.rst_n.value = 1
     await NextTimeStep()
+
+
+def read_outputs(dut) -> dict[str, int]:
+    return {
+        "master_gnt": logic_to_int(dut.master_gnt.value, "master_gnt"),
+        "bank0_req": logic_to_int(dut.bank0_req.value, "bank0_req"),
+        "bank0_cmd": logic_to_int(dut.bank0_cmd.value, "bank0_cmd"),
+        "bank0_addr": logic_to_int(dut.bank0_addr.value, "bank0_addr"),
+        "bank1_req": logic_to_int(dut.bank1_req.value, "bank1_req"),
+        "bank1_cmd": logic_to_int(dut.bank1_cmd.value, "bank1_cmd"),
+        "bank1_addr": logic_to_int(dut.bank1_addr.value, "bank1_addr"),
+    }
 
 
 async def sample_outputs_after_inputs(dut) -> dict[str, int]:
@@ -118,18 +139,6 @@ async def set_master_inputs(
     dut.master_addr_3.value = addr3 & 0xFFFFFFFF
 
 
-def read_outputs(dut) -> dict[str, int]:
-    return {
-        "master_gnt": int(dut.master_gnt.value),
-        "bank0_req": int(dut.bank0_req.value),
-        "bank0_cmd": int(dut.bank0_cmd.value),
-        "bank0_addr": int(dut.bank0_addr.value),
-        "bank1_req": int(dut.bank1_req.value),
-        "bank1_cmd": int(dut.bank1_cmd.value),
-        "bank1_addr": int(dut.bank1_addr.value),
-    }
-
-
 def assert_one_hot_grant(gnt: int) -> None:
     assert gnt == 0 or (gnt & (gnt - 1)) == 0, (
         f"master_gnt must be zero or one-hot, got {gnt:#05b}"
@@ -137,7 +146,7 @@ def assert_one_hot_grant(gnt: int) -> None:
 
 
 def read_fib_pri_reg(dut) -> int:
-    return int(dut.fib_pri_reg.value)
+    return logic_to_int(dut.fib_pri_reg.value, "fib_pri_reg")
 
 
 async def advance_fib_to_mode(dut, target_mode: int, seed0: int = 0, max_cycles: int = 32) -> None:
@@ -210,30 +219,42 @@ async def fib_priority_register_test(dut):
 
 
 @cocotb.test()
+async def fib_priority_register_seed_zero_test(dut):
+    await start_clock(dut)
+    await apply_reset(dut)
+
+    fib = read_fib_pri_reg(dut)
+    await FallingEdge(dut.clk)
+    dut.seed_in.value = 0
+    await Timer(1, unit="ns")
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        expected = next_fib_reg(fib, seed0=0)
+        fib = read_fib_pri_reg(dut)
+        assert fib == expected, f"expected fib_pri_reg={expected:#05b}, got {fib:#05b}"
+
+
+@cocotb.test()
 async def mode0_m0_highest_priority_grant_test(dut):
-    """In priority mode 0, M0 must win when it is the only requester."""
     await start_clock(dut)
     await apply_reset(dut)
     await advance_fib_to_mode(dut, 0)
-    assert (read_fib_pri_reg(dut) & 0x3) == 0
-
     await check_scenario(dut, req=0b0001, cmd=0b0001, addr0=0x0000_0100)
 
 
 @cocotb.test()
 async def mode0_m0_wins_over_lower_masters_test(dut):
-    """In priority mode 0, M0 must win even when other masters also request."""
     await start_clock(dut)
     await apply_reset(dut)
     await advance_fib_to_mode(dut, 0)
-
     await check_scenario(
         dut,
         req=0b1111,
         cmd=0b1010,
         addr0=0x0000_0200,
-        addr1=0x0000_0004,
-        addr2=0x0000_0007,
+        addr1=0x0000_0005,
+        addr2=0x0000_0006,
         addr3=0x0000_0009,
     )
 
@@ -257,16 +278,15 @@ async def single_master_grant_test(dut):
     await start_clock(dut)
     await apply_reset(dut)
 
-    addrs = [0x0000_0000, 0x0000_0002, 0x0000_0003, 0x0000_0005]
+    addrs = [0x0000_0000, 0x0000_0003, 0x0000_0002, 0x0000_0007]
     for mode in range(4):
         await advance_fib_to_mode(dut, mode)
         for master in range(4):
             req = 1 << master
-            cmd = 1 << master
             await check_scenario(
                 dut,
                 req=req,
-                cmd=cmd,
+                cmd=req,
                 addr0=addrs[0],
                 addr1=addrs[1],
                 addr2=addrs[2],
@@ -280,10 +300,10 @@ async def multi_master_arbitration_test(dut):
     await apply_reset(dut)
 
     scenarios = [
-        (0x0F, 0x0000_0000, 0x0000_0002, 0x0000_0003, 0x0000_0005),
-        (0x0A, 0x0000_0010, 0x0000_0012, 0x0000_0015, 0x0000_0017),
-        (0x05, 0x0000_0020, 0x0000_0022, 0x0000_0023, 0x0000_0025),
-        (0x0C, 0x0000_0030, 0x0000_0032, 0x0000_0035, 0x0000_0037),
+        (0x0F, 0x0000_0000, 0x0000_0003, 0x0000_0002, 0x0000_0007),
+        (0x0A, 0x0000_0010, 0x0000_0013, 0x0000_0014, 0x0000_0017),
+        (0x05, 0x0000_0020, 0x0000_0021, 0x0000_0022, 0x0000_0025),
+        (0x0C, 0x0000_0030, 0x0000_0031, 0x0000_0032, 0x0000_0037),
     ]
 
     for mode in range(4):
@@ -293,7 +313,7 @@ async def multi_master_arbitration_test(dut):
 
 
 @cocotb.test()
-async def bank0_even_routing_test(dut):
+async def even_address_routes_to_bank0_test(dut):
     await start_clock(dut)
     await apply_reset(dut)
 
@@ -301,26 +321,30 @@ async def bank0_even_routing_test(dut):
     await check_scenario(dut, req=0b0001, cmd=0b0001, addr0=0x0000_0100)
 
     await advance_fib_to_mode(dut, 1)
-    await check_scenario(dut, req=0b0010, cmd=0b0010, addr1=0x0000_0100)
+    await check_scenario(dut, req=0b0010, cmd=0b0010, addr1=0x0000_0200)
 
     await advance_fib_to_mode(dut, 2)
-    await check_scenario(dut, req=0b0001, cmd=0b0001, addr0=0x0000_0200)
+    await check_scenario(dut, req=0b0100, cmd=0b0100, addr2=0x0000_0300)
 
 
 @cocotb.test()
-async def bank1_odd_routing_test(dut):
+async def odd_address_routes_to_bank1_test(dut):
     await start_clock(dut)
     await apply_reset(dut)
 
+    await advance_fib_to_mode(dut, 0)
+    await check_scenario(dut, req=0b0001, cmd=0b0001, addr0=0x0000_0101)
+
     await advance_fib_to_mode(dut, 2)
-    await check_scenario(dut, req=0b0100, cmd=0b0100, addr2=0x0000_0301)
+    await check_scenario(dut, req=0b0100, cmd=0b0100, addr2=0x0000_0303)
 
     await advance_fib_to_mode(dut, 3)
     await check_scenario(dut, req=0b1000, cmd=0b1000, addr3=0x0000_0407)
 
 
 @cocotb.test()
-async def address_parity_blocks_bank_test(dut):
+async def parity_routing_all_masters_test(dut):
+    """Any granted master: even addr -> bank0, odd addr -> bank1."""
     await start_clock(dut)
     await apply_reset(dut)
 
@@ -329,13 +353,15 @@ async def address_parity_blocks_bank_test(dut):
     observed = await sample_outputs_after_inputs(dut)
     assert observed["master_gnt"] == 0b0001
     assert observed["bank0_req"] == 0
-    assert observed["bank1_req"] == 0
+    assert observed["bank1_req"] == 1
+    assert observed["bank1_addr"] == 0x0000_0001
 
     await advance_fib_to_mode(dut, 2)
     await set_master_inputs(dut, req=0b0100, cmd=0b0100, addr2=0x0000_0002)
     observed = await sample_outputs_after_inputs(dut)
     assert observed["master_gnt"] == 0b0100
-    assert observed["bank0_req"] == 0
+    assert observed["bank0_req"] == 1
+    assert observed["bank0_addr"] == 0x0000_0002
     assert observed["bank1_req"] == 0
 
 
@@ -351,18 +377,16 @@ async def read_command_propagation_test(dut):
 
 @cocotb.test()
 async def priority_rotation_smoke_test(dut):
-    """Exercise all four priority modes across consecutive clock cycles."""
     await start_clock(dut)
     await apply_reset(dut)
 
     req = 0b1111
     cmd = 0b0101
-    addrs = [0x0000_0100, 0x0000_0102, 0x0000_0103, 0x0000_0105]
+    addrs = [0x0000_0100, 0x0000_0103, 0x0000_0102, 0x0000_0107]
 
     seen_modes: set[int] = set()
     for _ in range(16):
-        mode = read_fib_pri_reg(dut) & 0x3
-        seen_modes.add(mode)
+        seen_modes.add(read_fib_pri_reg(dut) & 0x3)
         await check_scenario(
             dut,
             req=req,
@@ -406,7 +430,6 @@ def test_rdwrarbt_hidden_runner():
     sim = os.getenv("SIM", "icarus")
     proj_path = Path(__file__).resolve().parent.parent
     sources = [proj_path / "sources" / "rdwrarbt.sv"]
-    #sources = [proj_path / "golden" / "rdwrarbt.sv"]
 
     runner = get_runner(sim)
     runner.build(
