@@ -7,6 +7,10 @@ Latch inference ZERO — all outputs must be covered in every branch
 Required Nesting Structure — Exactly Three Levels Deep:
 The entire combinatorial always block must follow this exact nesting order — no reordering permitted
 
+  Level 1: dynamic_highest_priority rotation (if / else if chain — no case statements)
+  Level 2: master_req priority chain within the active rotation
+  Level 3: master_addr_N[0] bank routing inside each granted-master branch
+
 Priority Rotation Table — Must be implemented exactly:
 2'b00 M0 > M1 > M2 > M3 
 2'b01 M1 > M2 > M3 > M0 
@@ -14,14 +18,24 @@ Priority Rotation Table — Must be implemented exactly:
 2'b11 M3 > M0 > M1 > M2
 
 Memory Bank Routing (Combinatorial, inside same always block)
-After arbitration, route the granted master to the correct memory bank based on address LSB:
-for even addresses:
-If master_gnt[0] and master_addr_0[0] is 0 drive bank0_req, bank0_cmd, bank0_addr
-If master_gnt[1] and master_addr_1[0] is 0 drive bank0_req, bank0_cmd, bank0_addr
-For odd addresses:
-If master_gnt[2] and master_addr_2[0] is 1 drive bank1_req, bank1_cmd, bank1_addr
-If master_gnt[3] and master_addr_3[0] is 1 drive bank1_req, bank1_cmd, bank1_addr
-Both these can be active simultaneously for different masters.
+After arbitration grants exactly one master, route that granted master to a memory bank
+based on the granted master's address LSB. Routing must be nested inside the grant
+branch (not in a separate post-arbitration block).
+
+For whichever master N receives master_gnt[N] = 1'b1:
+  if master_addr_N[0] == 1'b0  (even address)
+    drive bank0_req, bank0_cmd, bank0_addr from master_cmd[N] and master_addr_N
+  else  (odd address)
+    drive bank1_req, bank1_cmd, bank1_addr from master_cmd[N] and master_addr_N
+
+This parity rule applies to every master (M0, M1, M2, M3) when that master wins arbitration.
+Examples:
+  M0 granted with addr 0x100 -> bank0
+  M0 granted with addr 0x101 -> bank1
+  M2 granted with addr 0x200 -> bank0
+  M2 granted with addr 0x203 -> bank1
+
+Only one master is granted at a time, so at most one bank interface is active per cycle.
 
 Fibonacci LFSR — Sequential Block Rules:
 Triggered on posedge clk or negedge rst_n
